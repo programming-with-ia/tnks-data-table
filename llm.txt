@@ -1,0 +1,400 @@
+# TABLE COMPONENT - DEFINITIVE ARCHITECTURAL GUIDE
+
+## 1. COMPONENT IDENTITY & PHILOSOPHY
+
+**What It Is**: A production-grade, server-first data table component for Next.js 15+ (App Router).
+**Core Stack**: TanStack Table (React Table v8) + Shadcn UI + Tailwind CSS + React Query (optional).
+**Primary Design Pattern**: The "URL as Source of Truth". All table state (pagination, sorting, filtering) is synchronized with the URL search parameters to ensure bookmarkable, shareable states.
+
+**Key Distinctions**:
+- **Server-Side Operations**: Unlike client-side tables, this component assumes sorting, filtering, and pagination happen on the server.
+- **Headless + Styled**: Logic is handled by TanStack, but the UI is fully styled with Shadcn/Tailwind.
+- **Complex Data Support**: Native support for hierarchical data (sub-rows) with multiple rendering strategies.
+- **Performance**: Heavy use of memoization (`useMemo`, `useCallback`) and optimized re-renders.
+
+---
+
+## 2. COMPLETE FEATURE INVENTORY
+
+### Data & State
+- **URL Synchronization**:
+  - Two-way binding between internal state and URL parameters.
+  - **Batching**: Updates are batched (100ms) to prevent history stack pollution and race conditions.
+  - **Serialization**: Automatic handling of JSON objects (like date ranges) in URL params.
+- **Server-Side Pagination**:
+  - Validates page numbers (auto-reset to 1 if out of bounds).
+  - Syncs `pageSize` changes to URL.
+- **Sorting**:
+  - Server-side sorting parameters (`sortBy`, `sortOrder`).
+  - UI supports single-column sorting (Asc/Desc/Clear).
+  - Internal architecture supports multi-sort, but UI exposes single-sort.
+- **Filtering**:
+  - **Global Search**: Debounced (500ms), sanitized input.
+  - **Date Range**: `from_date` and `to_date` params.
+  - **Column Filters**: Programmatic support via API.
+
+### Advanced Data Structures
+- **Hierarchical Data (Sub-rows)**:
+  - **3 Rendering Modes**:
+    1. `same-columns`: Child rows share parent columns (standard tree view).
+    2. `custom-columns`: Child rows use a completely different column definition (`subRowColumns`).
+    3. `custom-component`: Child rows render a custom React component spanning full width.
+  - **Expansion**: Configurable expand/collapse behavior.
+  - **Selection**: Independent parent/child selection logic (no auto-cascading).
+
+### User Interface
+- **Column Management**:
+  - **Resizing**: Draggable column borders, persisted to `localStorage` (debounced).
+  - **Reordering**: Drag-and-drop reordering via `DataTableViewOptions`, persisted to `localStorage`.
+  - **Visibility**: Toggle columns via dropdown, persisted to URL/State.
+- **Selection**:
+  - Checkbox selection (single/multi).
+  - **Cross-Page Selection**: Preserves selection across pages if `fetchByIdsFn` is provided.
+  - **Click-to-Select**: Optional row click toggle.
+- **Exporting**:
+  - **Formats**: CSV and Excel (`.xlsx` via `exceljs`).
+  - **Scope**: Current page, Selected items (cross-page), or All pages (server-fetch).
+  - **Sub-row Support**: Separate export actions for parents and sub-rows.
+  - **Transformation**: Hook (`transformFunction`) to format data before export.
+
+### Accessibility & UX
+- **Keyboard Navigation**:
+  - `Arrow` keys to navigate cells.
+  - `Space` to select row.
+  - `Enter` to activate row (trigger `onRowClick`).
+- **Loading States**: Skeleton loaders during data fetch.
+- **Error Handling**: Visual error alerts if fetch fails.
+
+---
+
+## 3. INSTALLATION & SETUP
+
+### Prerequisites
+- Next.js 15+ (App Router)
+- React 19+
+- Tailwind CSS
+
+### Dependencies
+```bash
+npm install @tanstack/react-table @tanstack/react-query date-fns date-fns-tz exceljs sonner lucide-react class-variance-authority clsx tailwind-merge
+# Shadcn UI components required:
+# button, input, popover, dropdown-menu, checkbox, select, separator, table, skeleton, alert, command, dialog
+```
+
+### Critical File Structure
+You must copy the following structure to `src/components/data-table/`:
+- `data-table.tsx`: Main entry point.
+- `column-header.tsx`: Sorting UI.
+- `pagination.tsx`: Pager UI.
+- `toolbar.tsx`: Filters & Actions.
+- `view-options.tsx`: Column visibility & reordering.
+- `data-export.tsx`: Export logic.
+- `hooks/`: `use-table-column-resize.ts`.
+- `utils/`: `url-state.ts`, `table-state-handlers.ts`, `export-utils.ts`, `column-sizing.ts`.
+
+---
+
+## 4. MINIMAL WORKING EXAMPLE
+
+This example assumes you have an API route at `/api/users` that accepts `page`, `limit`, `sort_by`, etc.
+
+```tsx
+"use client";
+
+import { DataTable } from "@/components/data-table/data-table";
+import { ColumnDef } from "@tanstack/react-table";
+import { DataTableColumnHeader } from "@/components/data-table/column-header";
+
+// 1. Define Data Type
+type User = {
+  id: number;
+  name: string;
+  email: string;
+  role: string;
+};
+
+// 2. Define Columns
+const columns: ColumnDef<User>[] = [
+  {
+    accessorKey: "name",
+    header: ({ column }) => <DataTableColumnHeader column={column} title="Name" />,
+    enableSorting: true,
+  },
+  {
+    accessorKey: "email",
+    header: "Email",
+  },
+  {
+    accessorKey: "role",
+    header: "Role",
+  },
+];
+
+// 3. Define Fetch Function
+async function fetchUsers(params: any) {
+  // params: { page, limit, search, from_date, to_date, sort_by, sort_order }
+  const queryString = new URLSearchParams({
+    page: params.page.toString(),
+    limit: params.limit.toString(),
+    search: params.search,
+    sort_by: params.sort_by,
+    sort_order: params.sort_order,
+  }).toString();
+
+  const res = await fetch(`/api/users?${queryString}`);
+  const data = await res.json();
+
+  return {
+    success: true,
+    data: data.users, // Array of User
+    pagination: {
+      page: data.page,
+      limit: data.limit,
+      total_pages: data.total_pages,
+      total_items: data.total_items,
+    },
+  };
+}
+
+export default function UsersTable() {
+  return (
+    <DataTable<User, unknown>
+      getColumns={() => columns}
+      fetchDataFn={fetchUsers}
+      idField="id"
+      config={{
+        enableRowSelection: true,
+        enableSearch: true,
+        enablePagination: true,
+        columnResizingTableId: "users_table_v1", // Required for persistence
+      }}
+      exportConfig={{
+        entityName: "Users",
+        headers: ["id", "name", "email", "role"],
+        columnMapping: { id: "ID", name: "Full Name" },
+        columnWidths: [{ wch: 10 }, { wch: 25 }, { wch: 25 }, { wch: 10 }]
+      }}
+    />
+  );
+}
+```
+
+---
+
+## 5. ROOT PROPS REFERENCE
+
+The `<DataTable />` component accepts the following props:
+
+| Prop | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `getColumns` | `(handleRowDeselection) => ColumnDef[]` | **Yes** | Function returning column definitions. |
+| `fetchDataFn` | `(params) => Promise<Result>` | **Yes** | Function to fetch data from API. |
+| `idField` | `string` | **Yes** | Unique key field in data (e.g., "id", "uuid"). |
+| `exportConfig` | `ExportConfig` | **Yes** | Configuration for CSV/Excel export. |
+| `fetchByIdsFn` | `(ids) => Promise<TData[]>` | No | Fetches data for cross-page selection/export. |
+| `config` | `TableConfig` | No | Toggles for UI features (search, selection, etc.). |
+| `subRowsConfig` | `SubRowsConfig` | No | Configuration for hierarchical data. |
+| `pageSizeOptions`| `number[]` | No | Options for "Rows per page" dropdown (default: [10, 20...]). |
+| `onRowClick` | `(row, index) => void` | No | Callback when a row is clicked. |
+| `renderToolbarContent` | `(props) => ReactNode` | No | Render custom buttons/actions in toolbar. |
+| `className` | `string` | No | Class for the outer container. |
+| `tableClassName` | `string` | No | Class for the `<table>` element. |
+
+---
+
+## 6. DATA MODEL & API CONTRACT
+
+### `fetchDataFn`
+The core data fetcher. Can be a standard Promise-returning function OR a React Query hook wrapper.
+
+**Standard Signature**:
+```typescript
+type DataFetchParams = {
+  page: number;
+  limit: number;
+  search: string;
+  from_date: string; // "YYYY-MM-DD"
+  to_date: string;   // "YYYY-MM-DD"
+  sort_by: string;
+  sort_order: "asc" | "desc";
+};
+
+async function fetchData(params: DataFetchParams): Promise<{
+  success: boolean;
+  data: TData[];
+  pagination: {
+    page: number;
+    limit: number;
+    total_pages: number;
+    total_items: number;
+  };
+}>
+```
+
+**React Query Signature**:
+To use React Query directly, attach `isQueryHook = true` to the function:
+```typescript
+function useMyQuery(...) { ... }
+useMyQuery.isQueryHook = true;
+```
+
+### `idField` (Strict Requirement)
+You MUST specify a unique key field (e.g., `idField="id"`).
+- **Type**: `string` or `number`.
+- **Usage**: Used for React keys, selection tracking, and expansion state.
+- **Warning**: If `idField` points to `undefined`, selection and expansion will break.
+
+### `fetchByIdsFn` (Cross-Page Selection)
+Required if you want to support "Export Selected" across multiple pages.
+```typescript
+async function fetchByIds(ids: number[] | string[]): Promise<TData[]>
+```
+If not provided, operations on selected items will fail for items not currently visible in the DOM.
+
+---
+
+## 7. CONFIGURATION (`TableConfig`)
+
+Passed via the `config` prop. Defaults are robust, but override as needed.
+
+| Option | Default | Purpose |
+| :--- | :--- | :--- |
+| `enableRowSelection` | `true` | Renders checkbox column. |
+| `enableClickRowSelect` | `false` | Clicking row body toggles selection. |
+| `enableUrlState` | `true` | **Critical**: Set `false` for purely local state. |
+| `enableColumnResizing` | `true` | Drag handles on headers. |
+| `columnResizingTableId` | `undefined` | **Required** for persistence. Key for `localStorage`. |
+| `enablePagination` | `true` | Show footer controls. |
+| `enableSearch` | `true` | Show global search input. |
+| `searchPlaceholder` | `undefined` | Custom placeholder text. |
+| `enableDateFilter` | `true` | Show date range picker. |
+| `allowExportNewColumns`| `true` | If true, `transformFunction` fields are exported. |
+| `defaultSortBy` | `undefined` | Initial sort field. |
+
+---
+
+## 8. SUB-ROWS (HIERARCHICAL DATA)
+
+The `subRowsConfig` prop controls nested data.
+
+### Mode 1: `same-columns`
+Standard table tree. Children render under parent using same columns.
+- **Constraint**: Child data shape must match Parent data shape.
+- **UI**: Indented first column.
+
+### Mode 2: `custom-columns`
+Children have their own distinct columns.
+```tsx
+subRowsConfig={{
+  enabled: true,
+  mode: "custom-columns",
+  subRowColumns: myChildColumns, // ColumnDef[]
+  showSubRowHeaders: true
+}}
+```
+- **Use Case**: Order (Parent) -> Items (Children with different fields).
+
+### Mode 3: `custom-component`
+Full control. Renders a single cell spanning the table width.
+```tsx
+subRowsConfig={{
+  enabled: true,
+  mode: "custom-component",
+  SubRowComponent: ({ row, data }) => <MyDetailView data={data} />
+}}
+```
+
+---
+
+## 9. EXAMPLES EXPLAINED
+
+### 1. Orders Example (`/example/orders`)
+**Concept**: Simple hierarchy (`same-columns`).
+- **Demonstrates**: An Order contains Items that look exactly like the parent row (same schema).
+- **Key Config**: `mode: "same-columns"`.
+- **Real-World Use**: File system browser (Folder -> File), Organization chart (Manager -> Employee).
+
+### 2. Bookings Example (`/example/bookings`)
+**Concept**: Complex hierarchy (`custom-columns`).
+- **Demonstrates**: A Booking (Customer, Date) contains Stops (Location, Time). The schema is completely different.
+- **Key Config**: `mode: "custom-columns"`, `subRowColumns` passed explicitly.
+- **Real-World Use**: Invoice -> Line Items, Shipment -> Packages.
+
+### 3. Tickets Example (`/example/tickets`)
+**Concept**: Rich detail view (`custom-component`).
+- **Demonstrates**: A Ticket contains Comments. Comments need avatars, timestamps, and rich text layout.
+- **Key Config**: `mode: "custom-component"`, `SubRowComponent` passed.
+- **Real-World Use**: Issue tracker -> Comments, Transaction -> Audit Log.
+
+---
+
+## 10. EXPORT SYSTEM ARCHITECTURE
+
+The export system is robust and handles large datasets.
+
+**Flow**:
+1. **Trigger**: User clicks Export -> "Export All Pages" (for example).
+2. **Fetch**: Calls `getAllItems()` (which usually calls an API endpoint returning full dataset).
+3. **Transform**: Runs `transformFunction(row)` on every item to format dates, currency, etc.
+4. **Filter**:
+   - If `allowExportNewColumns: false`: Strips any keys not present in visible table columns.
+   - If `true`: Includes new keys generated by transform.
+5. **Generate**: Uses `exceljs` to build a real Excel workbook (buffer) or generates CSV string.
+6. **Download**: Triggers browser download.
+
+**Config**:
+```tsx
+exportConfig={{
+  entityName: "Invoices",
+  headers: ["id", "amount", "date"], // Keys to export
+  columnMapping: { id: "ID #", amount: "Total" }, // Header labels
+  transformFunction: (row) => ({ ...row, amount: formatMoney(row.amount) })
+}}
+```
+
+---
+
+## 11. STATE MANAGEMENT DEEP DIVE
+
+### URL State (`useUrlState`)
+- **Batching**: Updates are collected in a `pendingUpdates` map and flushed after a microtask/timeout. This prevents "flicker" and browser history spam when multiple filters change simultaneously.
+- **Serialization**:
+  - Objects (like `{from_date, to_date}`) are `JSON.stringify`'d.
+  - Dates are parsed to `YYYY-MM-DD`.
+
+### Local Storage Persistence
+- **Column Widths**: Stored in `table-column-sizing-{tableId}`.
+- **Column Order**: Stored in `data-table-column-order`.
+- **Note**: Requires `columnResizingTableId` to be set in config to work correctly per-table.
+
+---
+
+## 12. EDGE CASES & TROUBLESHOOTING
+
+### 1. "React Query Hook is not a function"
+**Cause**: You passed `useMyQuery` but forgot `useMyQuery.isQueryHook = true`.
+**Fix**: Add the static property to your hook or wrap it in a standard async function.
+
+### 2. Selection Breaks on Page Change
+**Cause**: `idField` is incorrect or IDs are not unique.
+**Verification**: Check if your data has `id` or `_id` or `uuid`. Set `idField` prop accordingly.
+
+### 3. Sub-row Selection behavior
+**Gotcha**: Selecting a parent does **NOT** automatically select children. This is intentional to support independent selection logic. If you need cascading selection, you must implement it in a custom `onRowSelectionChange` handler (requires overriding internal logic, advanced usage).
+
+### 4. Hydration Errors
+**Cause**: `localStorage` reading during SSR.
+**Fix**: The component handles this via `useEffect`, but ensure you aren't rendering the table conditionally based on `window` presence in your parent component.
+
+### 5. Export is Empty
+**Cause**: `headers` in `exportConfig` do not match keys in `data` (or `transformFunction` output).
+**Fix**: Ensure `headers` contains the exact keys you want to export.
+
+---
+
+## 13. GLOSSARY
+
+- **AccessorKey**: Property name in data object (e.g., "user.name").
+- **SubRow**: Nested data array (default key: `subRows`).
+- **Faceted Filter**: Filter showing unique values count (not enabled by default UI, but supported by core).
+- **Optimistic Update**: UI updates immediately while URL sync happens in background.
